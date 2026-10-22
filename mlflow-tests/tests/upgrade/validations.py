@@ -204,8 +204,12 @@ def validate_upgrade_skill_registry(test_context: TestContext) -> None:
     case = _require_case_payload(test_context, "skill_registry")
     observed = test_context.upgrade_observed_state
     registered = observed.get("registered_skill_versions")
-    assert registered and len(registered) == len(case["versions"]), (
-        f"Expected {len(case['versions'])} registered Skill versions, got {registered}"
+    # The Skill name is unique per run, so registration must create versions 1..N in order.
+    # Checking the numbers directly keeps a registration that reuses a version from passing.
+    expected_versions = list(range(1, len(case["versions"]) + 1))
+    observed_versions = [entry["version"] for entry in registered or []]
+    assert observed_versions == expected_versions, (
+        f"Expected registered Skill versions {expected_versions}, got {observed_versions}"
     )
     first, last = registered[0], registered[-1]
     for entry in registered:

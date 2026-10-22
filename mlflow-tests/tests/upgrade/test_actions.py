@@ -500,3 +500,63 @@ def test_action_delete_upgrade_skill_propagates_unexpected_errors() -> None:
 
     with pytest.raises(MlflowException, match="boom"):
         upgrade_actions.action_delete_upgrade_skill(test_context)
+
+
+class _FakeCleanupAdminClient:
+    def __init__(self, errors: dict[str, Exception] | None = None) -> None:
+        self.deleted = []
+        self.errors = errors or {}
+
+    def delete_skill(self, *, name, organization):
+        self.deleted.append((organization, name))
+        if name in self.errors:
+            raise self.errors[name]
+
+
+def test_cleanup_upgrade_skills_deletes_tracked_skills_in_their_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspaces = []
+    monkeypatch.setattr(upgrade_actions.mlflow, "set_workspace", workspaces.append)
+    test_context = TestContext()
+    test_context.add_skill_for_cleanup(name="upgrade-skill-abc", workspace="mlflow-upgrade-test-workspace")
+    admin_client = _FakeCleanupAdminClient()
+
+    upgrade_actions.cleanup_upgrade_skills(test_context, admin_client)
+
+    assert admin_client.deleted == [("", "upgrade-skill-abc")]
+    assert workspaces == ["mlflow-upgrade-test-workspace"]
+
+
+def test_cleanup_upgrade_skills_does_nothing_without_tracked_skills(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(upgrade_actions.mlflow, "set_workspace", lambda workspace: None)
+    admin_client = _FakeCleanupAdminClient()
+
+    upgrade_actions.cleanup_upgrade_skills(TestContext(), admin_client)
+
+    assert admin_client.deleted == []
+
+
+def test_cleanup_upgrade_skills_tolerates_missing_and_failed_deletes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(upgrade_actions.mlflow, "set_workspace", lambda workspace: None)
+    test_context = TestContext()
+    for name in ("already-deleted", "delete-fails", "still-present"):
+        test_context.add_skill_for_cleanup(name=name, workspace="mlflow-upgrade-test-workspace")
+    admin_client = _FakeCleanupAdminClient(
+        errors={
+            "already-deleted": MlflowException(message="RESOURCE_DOES_NOT_EXIST: Skill does not exist"),
+            "delete-fails": MlflowException(message="INTERNAL_ERROR: boom"),
+        }
+    )
+
+    upgrade_actions.cleanup_upgrade_skills(test_context, admin_client)
+
+    assert admin_client.deleted == [
+        ("", "already-deleted"),
+        ("", "delete-fails"),
+        ("", "still-present"),
+    ]

@@ -548,3 +548,21 @@ def action_delete_upgrade_skill(test_context: TestContext) -> None:
         test_context.upgrade_observed_state["skill_exists_after_delete"] = False
     else:
         test_context.upgrade_observed_state["skill_exists_after_delete"] = True
+
+
+def cleanup_upgrade_skills(test_context: TestContext, admin_client) -> None:
+    """Delete Skills created by an upgrade scenario, leaving seeded upgrade data in place.
+
+    The shared resource cleanup is skipped during upgrade phases so the seeded state survives,
+    which would otherwise leave a Skill behind in the static workspace when a scenario fails
+    before its own delete step. Only Skills tracked in skills_to_delete are removed.
+    """
+    for (organization, name), workspace in test_context.skills_to_delete.items():
+        try:
+            mlflow.set_workspace(workspace)
+            admin_client.delete_skill(name=name, organization=organization)
+            logger.info("Deleted upgrade Skill '%s' in workspace '%s'", name, workspace)
+        except MlflowException as exc:
+            if _is_missing_resource_error(exc):
+                continue
+            logger.warning("Failed to delete upgrade Skill '%s' in workspace '%s': %s", name, workspace, exc)
