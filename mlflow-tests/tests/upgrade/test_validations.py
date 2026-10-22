@@ -242,3 +242,13 @@ def test_validate_upgrade_skill_deleted_fails_unless_skill_is_gone(exists: bool 
 def test_validate_upgrade_skill_deleted_passes_when_skill_is_gone() -> None:
     test_context = TestContext(upgrade_observed_state={"skill_exists_after_delete": False})
     upgrade_validations.validate_upgrade_skill_deleted(test_context)
+
+
+def test_validate_upgrade_skill_registry_fails_when_registration_reuses_a_version() -> None:
+    observed = _skill_registry_observations()
+    observed["registered_skill_versions"][1]["version"] = 1
+    observed["skill"]["latest_version"] = 1
+    observed["latest_skill_version"] = 1
+
+    with pytest.raises(AssertionError, match=r"Expected registered Skill versions \[1, 2\], got \[1, 1\]"):
+        upgrade_validations.validate_upgrade_skill_registry(_skill_registry_context(observed))
