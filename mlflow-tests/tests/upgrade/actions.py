@@ -20,7 +20,7 @@ import requests
 
 from ..constants.config import Config
 from ..http_utils import get_mlflow_base_uri, get_requests_verify_value
-from ..shared import TestContext
+from ..shared import ActiveSkill, TestContext
 from .utils import (
     get_pre_upgrade_version_from_configmap,
     get_supported_upgrade_version_from_env,
@@ -432,9 +432,9 @@ def action_create_upgrade_mcp_access_endpoint(test_context: TestContext) -> None
 
 
 def _require_active_skill_name(test_context: TestContext) -> str:
-    if not test_context.active_skill_name:
-        raise ValueError("active_skill_name must be set before this action")
-    return test_context.active_skill_name
+    if test_context.active_skill is None or not test_context.active_skill.name:
+        raise ValueError("active_skill.name must be set before this action")
+    return test_context.active_skill.name
 
 
 def action_require_skill_registry(test_context: TestContext) -> None:
@@ -460,7 +460,7 @@ def action_register_upgrade_skill_versions(test_context: TestContext) -> None:
     payload = _require_upgrade_payload(test_context, "skill_registry")
     # A unique name keeps reruns in the static upgrade workspace independent.
     name = f"{payload['name_prefix']}-{uuid.uuid4().hex[:12]}"
-    test_context.active_skill_name = name
+    test_context.active_skill = ActiveSkill(name=name)
     registered = []
     for version_payload in payload["versions"]:
         skill_markdown = (

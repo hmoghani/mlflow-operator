@@ -5,7 +5,7 @@ import pytest
 from mlflow.exceptions import MlflowException
 
 from . import actions as upgrade_actions
-from ..shared import TestContext
+from ..shared import ActiveSkill, TestContext
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -392,7 +392,7 @@ def test_action_register_upgrade_skill_versions_registers_each_version(
 
     upgrade_actions.action_register_upgrade_skill_versions(test_context)
 
-    name = test_context.active_skill_name
+    name = test_context.active_skill.name
     assert name.startswith("upgrade-skill-")
     assert [entry["version"] for entry in test_context.upgrade_observed_state["registered_skill_versions"]] == [1, 2]
     assert [entry["skill_markdown"] for entry in test_context.upgrade_observed_state["registered_skill_versions"]] == (
@@ -405,7 +405,7 @@ def test_action_register_upgrade_skill_versions_registers_each_version(
 
 def test_action_tag_and_alias_upgrade_skill_requires_registered_versions() -> None:
     test_context = TestContext(
-        active_skill_name="upgrade-skill-abc",
+        active_skill=ActiveSkill(name="upgrade-skill-abc"),
         upgrade_state={"skill_registry": _SKILL_REGISTRY_STATE},
     )
 
@@ -416,7 +416,7 @@ def test_action_tag_and_alias_upgrade_skill_requires_registered_versions() -> No
 def test_action_tag_and_alias_upgrade_skill_targets_first_version() -> None:
     client = _FakeSkillClient()
     test_context = TestContext(
-        active_skill_name="upgrade-skill-abc",
+        active_skill=ActiveSkill(name="upgrade-skill-abc"),
         user_client=client,
         upgrade_state={"skill_registry": _SKILL_REGISTRY_STATE},
         upgrade_observed_state={"registered_skill_versions": [{"version": 1}, {"version": 2}]},
@@ -455,7 +455,7 @@ def test_action_collect_upgrade_skill_observations_records_reads_and_pull(
     monkeypatch.setattr(upgrade_actions, "compute_tree_digest", lambda root: "sha256:pulled")
     client = _FakeSkillClient()
     test_context = TestContext(
-        active_skill_name="upgrade-skill-abc",
+        active_skill=ActiveSkill(name="upgrade-skill-abc"),
         user_client=client,
         upgrade_state={"skill_registry": _SKILL_REGISTRY_STATE},
     )
@@ -478,7 +478,7 @@ def test_action_delete_upgrade_skill_records_missing_skill() -> None:
     client = _FakeSkillClient(
         get_skill_error=MlflowException(message="RESOURCE_DOES_NOT_EXIST: Skill does not exist")
     )
-    test_context = TestContext(active_skill_name="upgrade-skill-abc", user_client=client)
+    test_context = TestContext(active_skill=ActiveSkill(name="upgrade-skill-abc"), user_client=client)
 
     upgrade_actions.action_delete_upgrade_skill(test_context)
 
@@ -487,7 +487,7 @@ def test_action_delete_upgrade_skill_records_missing_skill() -> None:
 
 
 def test_action_delete_upgrade_skill_records_skill_still_present() -> None:
-    test_context = TestContext(active_skill_name="upgrade-skill-abc", user_client=_FakeSkillClient())
+    test_context = TestContext(active_skill=ActiveSkill(name="upgrade-skill-abc"), user_client=_FakeSkillClient())
 
     upgrade_actions.action_delete_upgrade_skill(test_context)
 
@@ -496,7 +496,7 @@ def test_action_delete_upgrade_skill_records_skill_still_present() -> None:
 
 def test_action_delete_upgrade_skill_propagates_unexpected_errors() -> None:
     client = _FakeSkillClient(get_skill_error=MlflowException(message="INTERNAL_ERROR: boom"))
-    test_context = TestContext(active_skill_name="upgrade-skill-abc", user_client=client)
+    test_context = TestContext(active_skill=ActiveSkill(name="upgrade-skill-abc"), user_client=client)
 
     with pytest.raises(MlflowException, match="boom"):
         upgrade_actions.action_delete_upgrade_skill(test_context)
