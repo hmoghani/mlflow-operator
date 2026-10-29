@@ -11,7 +11,6 @@ from ..actions import (
     action_delete_upgrade_skill,
     action_read_pre_upgrade_version_configmap,
     action_register_upgrade_skill_versions,
-    action_require_skill_registry,
     action_tag_and_alias_upgrade_skill,
 )
 from ...shared import TestData, TestStep
@@ -106,10 +105,6 @@ class TestMLflow310PostUpgrade(UpgradePhaseBase):
                         "action_select_skill_registry_state",
                         skill_registry=SKILL_REGISTRY_STATE,
                     )
-                ),
-                TestStep(
-                    action_func=action_require_skill_registry,
-                    validate_func=validate_no_error,
                 ),
                 TestStep(
                     action_func=action_register_upgrade_skill_versions,

@@ -15,7 +15,6 @@ from mlflow.exceptions import MlflowException
 from mlflow.genai.skill_content.digest import compute_tree_digest
 from mlflow.tracing.attachments import Attachment
 from mlflow.utils.workspace_utils import WORKSPACE_HEADER_NAME
-import pytest
 import requests
 
 from ..constants.config import Config
@@ -435,24 +434,6 @@ def _require_active_skill_name(test_context: TestContext) -> str:
     if test_context.active_skill is None or not test_context.active_skill.name:
         raise ValueError("active_skill.name must be set before this action")
     return test_context.active_skill.name
-
-
-def action_require_skill_registry(test_context: TestContext) -> None:
-    """Skip the scenario when the upgraded MLflow server does not serve the Skill Registry."""
-    # The Kubernetes auth plugin also answers 404 for routes it has no rule for, so a 404
-    # means the registry is absent whether or not the request reached MLflow.
-    response = requests.get(
-        f"{get_mlflow_base_uri()}/api/3.0/mlflow/skills",
-        headers={
-            "Authorization": f"Bearer {Config.K8_API_TOKEN}",
-            WORKSPACE_HEADER_NAME: test_context.active_workspace,
-        },
-        verify=get_requests_verify_value(),
-        timeout=Config.REQUEST_TIMEOUT,
-    )
-    if response.status_code == 404:
-        pytest.skip("The upgraded MLflow server does not serve the Skill Registry routes")
-    response.raise_for_status()
 
 
 def action_register_upgrade_skill_versions(test_context: TestContext) -> None:

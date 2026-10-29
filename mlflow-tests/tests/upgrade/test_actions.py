@@ -337,43 +337,6 @@ class _FakeSkillClient:
         return [SimpleNamespace(name=kwargs["include_skill_identities"][0])]
 
 
-def _patch_skill_probe(monkeypatch: pytest.MonkeyPatch, status_code: int) -> None:
-    def fake_get(*args, **kwargs):
-        response = upgrade_actions.requests.Response()
-        response.status_code = status_code
-        return response
-
-    monkeypatch.setattr(upgrade_actions.requests, "get", fake_get)
-    monkeypatch.setattr(upgrade_actions, "get_mlflow_base_uri", lambda: "https://mlflow.invalid")
-    monkeypatch.setattr(upgrade_actions, "get_requests_verify_value", lambda: True)
-
-
-def test_action_require_skill_registry_skips_when_routes_are_missing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _patch_skill_probe(monkeypatch, 404)
-
-    with pytest.raises(pytest.skip.Exception, match="does not serve the Skill Registry"):
-        upgrade_actions.action_require_skill_registry(TestContext(active_workspace="ws"))
-
-
-def test_action_require_skill_registry_passes_when_routes_exist(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _patch_skill_probe(monkeypatch, 200)
-
-    upgrade_actions.action_require_skill_registry(TestContext(active_workspace="ws"))
-
-
-def test_action_require_skill_registry_raises_on_server_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _patch_skill_probe(monkeypatch, 500)
-
-    with pytest.raises(upgrade_actions.requests.HTTPError):
-        upgrade_actions.action_require_skill_registry(TestContext(active_workspace="ws"))
-
-
 def test_action_register_upgrade_skill_versions_registers_each_version(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
