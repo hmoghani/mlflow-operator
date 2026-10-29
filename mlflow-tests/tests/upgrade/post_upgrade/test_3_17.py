@@ -13,14 +13,15 @@ import pytest
 
 from ..actions import (
     make_upgrade_state_action,
+    action_collect_upgrade_oci_skill_versions,
     action_collect_upgrade_skill_observations,
 )
 from ...constants.config import Config
 from ...shared import TestData, TestStep
-from ..shared.upgrade_state_3_17 import SKILL_REGISTRY_STATE
+from ..shared.upgrade_state_3_17 import SKILL_REGISTRY_OCI_STATE, SKILL_REGISTRY_STATE
 from ..phase_base import UpgradePhaseBase
 from ..utils import get_upgrade_test_workspace
-from ..validations import validate_upgrade_skill_registry
+from ..validations import validate_upgrade_oci_skill_version, validate_upgrade_skill_registry
 
 logger = logging.getLogger(__name__)
 UPGRADE_TEST_WORKSPACE = get_upgrade_test_workspace()
@@ -28,9 +29,26 @@ UPGRADE_TEST_WORKSPACE = get_upgrade_test_workspace()
 
 @pytest.mark.post_upgrade
 class TestMLflow317PostUpgrade(UpgradePhaseBase):
-    test_scenarios: ClassVar[list[TestData]] = []
+    test_scenarios: ClassVar[list[TestData]] = [
+        TestData(
+            test_name="Validate static OCI Skill",
+            workspace_to_use=UPGRADE_TEST_WORKSPACE,
+            test_steps=[
+                TestStep(
+                    action_func=make_upgrade_state_action(
+                        "action_select_skill_registry_oci_state",
+                        skill_registry_oci=SKILL_REGISTRY_OCI_STATE,
+                    )
+                ),
+                TestStep(
+                    action_func=action_collect_upgrade_oci_skill_versions,
+                    validate_func=validate_upgrade_oci_skill_version,
+                ),
+            ],
+        ),
+    ]
 
-    # The pre-upgrade phase seeds the Skill only when MLflow serves artifacts.
+    # The pre-upgrade phase seeds the uploaded Skill only when MLflow serves artifacts.
     if Config.effective_serve_artifacts():
         test_scenarios.append(
             TestData(

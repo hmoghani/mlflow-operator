@@ -470,3 +470,85 @@ def test_action_collect_upgrade_skill_observations_records_reads_and_pull(
     assert ("search_skills", {"include_skill_identities": ["upgrade-test-skill"]}) in client.calls
     assert observed["pulled_skill_markdown"] == "pulled content"
     assert observed["pulled_skill_digest"] == "sha256:pulled"
+
+
+_OCI_SKILL_STATE = {
+    "name": "upgrade-test-oci-skill",
+    "image": "registry.example.invalid/upgrade-tests/skill:v1",
+    "subpath": "skills/upgrade",
+    "digest": "a" * 64,
+}
+
+
+class _FakeOciSkillClient(_FakeSkillClient):
+    def create_skill_version(self, **kwargs):
+        self.calls.append(("create_skill_version", kwargs))
+        return SimpleNamespace(name=kwargs["name"], version=1)
+
+    def search_skill_versions(self, **kwargs):
+        self.calls.append(("search_skill_versions", kwargs))
+        return [
+            SimpleNamespace(
+                version=1,
+                source_type=SimpleNamespace(value="oci"),
+                source=SimpleNamespace(image=_OCI_SKILL_STATE["image"], subpath=_OCI_SKILL_STATE["subpath"]),
+                digest=_OCI_SKILL_STATE["digest"],
+            )
+        ]
+
+
+def test_action_register_upgrade_oci_skill_version_registers_metadata_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        upgrade_actions.mlflow.genai,
+        "register_skill",
+        lambda **kwargs: pytest.fail("register_skill fetches the source and must not be called"),
+    )
+    client = _FakeOciSkillClient(get_skill_error=_missing_skill_error())
+    test_context = TestContext(user_client=client, upgrade_state={"skill_registry_oci": _OCI_SKILL_STATE})
+
+    upgrade_actions.action_register_upgrade_oci_skill_version(test_context)
+
+    create_calls = [kwargs for call, kwargs in client.calls if call == "create_skill_version"]
+    assert create_calls == [
+        {
+            "name": "upgrade-test-oci-skill",
+            "source": upgrade_actions.OCISource(
+                image="registry.example.invalid/upgrade-tests/skill:v1", subpath="skills/upgrade"
+            ),
+            "digest": "a" * 64,
+        }
+    ]
+    assert test_context.skills_to_delete == {}
+
+
+def test_action_register_upgrade_oci_skill_version_fails_if_already_exists() -> None:
+    client = _FakeOciSkillClient()
+    test_context = TestContext(
+        active_workspace="mlflow-upgrade-test-workspace",
+        user_client=client,
+        upgrade_state={"skill_registry_oci": _OCI_SKILL_STATE},
+    )
+
+    with pytest.raises(AssertionError, match="'upgrade-test-oci-skill' already exists"):
+        upgrade_actions.action_register_upgrade_oci_skill_version(test_context)
+    assert not any(call == "create_skill_version" for call, _ in client.calls)
+
+
+def test_action_collect_upgrade_oci_skill_versions_records_source_metadata() -> None:
+    client = _FakeOciSkillClient()
+    test_context = TestContext(user_client=client, upgrade_state={"skill_registry_oci": _OCI_SKILL_STATE})
+
+    upgrade_actions.action_collect_upgrade_oci_skill_versions(test_context)
+
+    assert ("search_skill_versions", {"name": "upgrade-test-oci-skill"}) in client.calls
+    assert test_context.upgrade_observed_state["oci_skill_versions"] == [
+        {
+            "version": 1,
+            "source_type": "oci",
+            "image": "registry.example.invalid/upgrade-tests/skill:v1",
+            "subpath": "skills/upgrade",
+            "digest": "a" * 64,
+        }
+    ]

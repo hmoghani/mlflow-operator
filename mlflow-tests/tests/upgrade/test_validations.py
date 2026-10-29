@@ -262,3 +262,52 @@ def test_validate_upgrade_skill_registry_fails_on_version_search_or_pull_mismatc
 
     with pytest.raises(AssertionError, match=message):
         upgrade_validations.validate_upgrade_skill_registry(_skill_registry_context(observed))
+
+
+_OCI_SKILL_CASE = {
+    "name": "upgrade-test-oci-skill",
+    "image": "registry.example.invalid/upgrade-tests/skill:v1",
+    "subpath": "skills/upgrade",
+    "digest": "a" * 64,
+}
+
+
+def _oci_skill_version(**overrides) -> dict:
+    version = {
+        "version": 1,
+        "source_type": "oci",
+        "image": _OCI_SKILL_CASE["image"],
+        "subpath": _OCI_SKILL_CASE["subpath"],
+        "digest": _OCI_SKILL_CASE["digest"],
+    }
+    version.update(overrides)
+    return version
+
+
+def _oci_skill_context(observed_versions) -> TestContext:
+    return TestContext(
+        upgrade_state={"skill_registry_oci": _OCI_SKILL_CASE},
+        upgrade_observed_state={"oci_skill_versions": observed_versions},
+    )
+
+
+def test_validate_upgrade_oci_skill_version_passes_when_metadata_matches() -> None:
+    upgrade_validations.validate_upgrade_oci_skill_version(_oci_skill_context([_oci_skill_version()]))
+
+
+@pytest.mark.parametrize(
+    "observed_versions",
+    [
+        [_oci_skill_version(source_type="git")],
+        [_oci_skill_version(image="registry.example.invalid/upgrade-tests/skill:v2")],
+        [_oci_skill_version(subpath=None)],
+        [_oci_skill_version(digest="b" * 64)],
+        [_oci_skill_version(), _oci_skill_version(version=2)],
+        [],
+        None,
+    ],
+    ids=["source-type", "image", "subpath", "digest", "extra-version", "no-versions", "not-collected"],
+)
+def test_validate_upgrade_oci_skill_version_fails_on_mismatch(observed_versions) -> None:
+    with pytest.raises(AssertionError, match="OCI Skill versions mismatch"):
+        upgrade_validations.validate_upgrade_oci_skill_version(_oci_skill_context(observed_versions))

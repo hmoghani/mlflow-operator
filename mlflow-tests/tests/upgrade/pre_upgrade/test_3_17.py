@@ -13,18 +13,21 @@ import pytest
 
 from ..actions import (
     make_upgrade_state_action,
+    action_collect_upgrade_oci_skill_versions,
     action_collect_upgrade_skill_observations,
+    action_register_upgrade_oci_skill_version,
     action_register_upgrade_skill_versions,
     action_tag_and_alias_upgrade_skill,
 )
 from ...constants.config import Config
 from ...shared import TestData, TestStep
 from ...validations import validate_no_error
-from ..shared.upgrade_state_3_17 import SKILL_REGISTRY_STATE
+from ..shared.upgrade_state_3_17 import SKILL_REGISTRY_OCI_STATE, SKILL_REGISTRY_STATE
 from ..phase_base import UpgradePhaseBase
 from ..utils import get_upgrade_test_workspace
 from ..validations import (
     validate_registered_upgrade_skill_versions,
+    validate_upgrade_oci_skill_version,
     validate_upgrade_skill_registry,
 )
 
@@ -34,7 +37,28 @@ UPGRADE_TEST_WORKSPACE = get_upgrade_test_workspace()
 
 @pytest.mark.pre_upgrade
 class TestMLflow317PreUpgrade(UpgradePhaseBase):
-    test_scenarios: ClassVar[list[TestData]] = []
+    test_scenarios: ClassVar[list[TestData]] = [
+        TestData(
+            test_name="Seed static OCI Skill",
+            workspace_to_use=UPGRADE_TEST_WORKSPACE,
+            test_steps=[
+                TestStep(
+                    action_func=make_upgrade_state_action(
+                        "action_select_skill_registry_oci_state",
+                        skill_registry_oci=SKILL_REGISTRY_OCI_STATE,
+                    )
+                ),
+                TestStep(
+                    action_func=action_register_upgrade_oci_skill_version,
+                    validate_func=validate_no_error,
+                ),
+                TestStep(
+                    action_func=action_collect_upgrade_oci_skill_versions,
+                    validate_func=validate_upgrade_oci_skill_version,
+                ),
+            ],
+        ),
+    ]
 
     # Registering Skill versions from a local directory needs MLflow artifact serving, so the
     # Skill is only seeded where the Skill Registry tests also register local Skills.

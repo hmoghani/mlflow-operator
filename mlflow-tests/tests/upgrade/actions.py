@@ -11,6 +11,7 @@ from pathlib import Path
 import mlflow
 from mlflow.entities.span import NO_OP_SPAN_TRACE_ID
 from mlflow.exceptions import MlflowException
+from mlflow.genai import OCISource
 from mlflow.genai.skill_content.digest import compute_tree_digest
 from mlflow.tracing.attachments import Attachment
 from mlflow.utils.workspace_utils import WORKSPACE_HEADER_NAME
@@ -430,10 +431,7 @@ def action_create_upgrade_mcp_access_endpoint(test_context: TestContext) -> None
     test_context.upgrade_observed_state["mcp_access_endpoint_id"] = endpoint.id
 
 
-def action_register_upgrade_skill_versions(test_context: TestContext) -> None:
-    """Register each configured version of the static upgrade Skill from a local directory."""
-    payload = _require_upgrade_payload(test_context, "skill_registry")
-    name = payload["name"]
+def _require_upgrade_skill_absent(test_context: TestContext, name: str) -> None:
     try:
         test_context.user_client.get_skill(name=name)
         raise AssertionError(
@@ -443,6 +441,13 @@ def action_register_upgrade_skill_versions(test_context: TestContext) -> None:
     except MlflowException as exc:
         if not _is_missing_resource_error(exc):
             raise
+
+
+def action_register_upgrade_skill_versions(test_context: TestContext) -> None:
+    """Register each configured version of the static upgrade Skill from a local directory."""
+    payload = _require_upgrade_payload(test_context, "skill_registry")
+    name = payload["name"]
+    _require_upgrade_skill_absent(test_context, name)
     registered = []
     for version_payload in payload["versions"]:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -504,3 +509,32 @@ def action_collect_upgrade_skill_observations(test_context: TestContext) -> None
         pulled = Path(mlflow.genai.pull(f"skills:/{name}@{alias}", destination=Path(tmpdir) / "pulled"))
         observed["pulled_skill_markdown"] = (pulled / "SKILL.md").read_text(encoding="utf-8")
         observed["pulled_skill_digest"] = compute_tree_digest(pulled)
+
+
+def action_register_upgrade_oci_skill_version(test_context: TestContext) -> None:
+    """Register the static OCI Skill version from its source metadata, without fetching the image."""
+    payload = _require_upgrade_payload(test_context, "skill_registry_oci")
+    name = payload["name"]
+    _require_upgrade_skill_absent(test_context, name)
+    version = test_context.user_client.create_skill_version(
+        name=name,
+        source=OCISource(image=payload["image"], subpath=payload["subpath"]),
+        digest=payload["digest"],
+    )
+    logger.info("Registered upgrade OCI Skill '%s' version %s", name, version.version)
+
+
+def action_collect_upgrade_oci_skill_versions(test_context: TestContext) -> None:
+    """Record the stored source metadata of each version of the static OCI Skill."""
+    payload = _require_upgrade_payload(test_context, "skill_registry_oci")
+    versions = test_context.user_client.search_skill_versions(name=payload["name"])
+    test_context.upgrade_observed_state["oci_skill_versions"] = [
+        {
+            "version": version.version,
+            "source_type": getattr(version.source_type, "value", version.source_type),
+            "image": getattr(version.source, "image", None),
+            "subpath": getattr(version.source, "subpath", None),
+            "digest": version.digest,
+        }
+        for version in versions
+    ]

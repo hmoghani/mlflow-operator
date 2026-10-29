@@ -279,3 +279,19 @@ def validate_upgrade_skill_registry(test_context: TestContext) -> None:
     assert observed["pulled_skill_digest"] == first["digest"], (
         f"Pulled content digest mismatch: expected '{first['digest']}', got '{observed['pulled_skill_digest']}'"
     )
+
+
+def validate_upgrade_oci_skill_version(test_context: TestContext) -> None:
+    """Validate that the static OCI Skill version kept its source metadata and digest."""
+    case = _require_case_payload(test_context, "skill_registry_oci")
+    expected = [
+        {
+            "version": 1,
+            "source_type": "oci",
+            "image": case["image"],
+            "subpath": case["subpath"],
+            "digest": case["digest"],
+        }
+    ]
+    observed = test_context.upgrade_observed_state.get("oci_skill_versions")
+    assert observed == expected, f"OCI Skill versions mismatch: expected {expected}, got {observed}"
