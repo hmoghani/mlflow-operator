@@ -5,7 +5,7 @@ import pytest
 from mlflow.exceptions import MlflowException
 
 from . import actions as upgrade_actions
-from ..shared import ActiveSkill, TestContext
+from ..shared import TestContext
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -287,8 +287,8 @@ def test_action_create_upgrade_mcp_access_endpoint_records_endpoint_id(
 
 
 _SKILL_REGISTRY_STATE = {
-    "name_prefix": "upgrade-skill",
-    "description": "Skill registered after upgrading a pre-registry deployment",
+    "name": "upgrade-test-skill",
+    "description": "Static upgrade-test Skill",
     "skill_tags": {"upgrade-tag-key": "upgrade-tag-value"},
     "version_tags": {"upgrade-version-tag-key": "upgrade-version-tag-value"},
     "alias": "production",
@@ -313,10 +313,8 @@ class _FakeSkillClient:
     def set_skill_alias(self, **kwargs):
         self.calls.append(("set_skill_alias", kwargs))
 
-    def delete_skill(self, **kwargs):
-        self.calls.append(("delete_skill", kwargs))
-
     def get_skill(self, **kwargs):
+        self.calls.append(("get_skill", kwargs))
         if self.get_skill_error is not None:
             raise self.get_skill_error
         return SimpleNamespace(
@@ -325,6 +323,13 @@ class _FakeSkillClient:
             aliases={"production": 1},
             latest_version=2,
         )
+
+    def search_skill_versions(self, **kwargs):
+        self.calls.append(("search_skill_versions", kwargs))
+        return [
+            SimpleNamespace(version=1, digest="sha256:v1"),
+            SimpleNamespace(version=2, digest="sha256:v2"),
+        ]
 
     def get_skill_version_by_alias(self, **kwargs):
         return SimpleNamespace(version=1, digest="sha256:v1", tags={"k": "v"})
@@ -337,40 +342,71 @@ class _FakeSkillClient:
         return [SimpleNamespace(name=kwargs["include_skill_identities"][0])]
 
 
+def _missing_skill_error() -> MlflowException:
+    return MlflowException(message="RESOURCE_DOES_NOT_EXIST: Skill does not exist")
+
+
 def test_action_register_upgrade_skill_versions_registers_each_version(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registered_markdown = []
+    registered = []
 
     def fake_register_skill(source, name):
-        registered_markdown.append((Path(source) / "SKILL.md").read_text(encoding="utf-8"))
-        number = len(registered_markdown)
+        registered.append((name, (Path(source) / "SKILL.md").read_text(encoding="utf-8")))
+        number = len(registered)
         return SimpleNamespace(name=name, organization="", version=number, digest=f"sha256:v{number}")
 
     monkeypatch.setattr(upgrade_actions.mlflow.genai, "register_skill", fake_register_skill)
     test_context = TestContext(
         active_workspace="mlflow-upgrade-test-workspace",
+        user_client=_FakeSkillClient(get_skill_error=_missing_skill_error()),
         upgrade_state={"skill_registry": _SKILL_REGISTRY_STATE},
     )
 
     upgrade_actions.action_register_upgrade_skill_versions(test_context)
 
-    name = test_context.active_skill.name
-    assert name.startswith("upgrade-skill-")
-    assert [entry["version"] for entry in test_context.upgrade_observed_state["registered_skill_versions"]] == [1, 2]
-    assert [entry["skill_markdown"] for entry in test_context.upgrade_observed_state["registered_skill_versions"]] == (
-        registered_markdown
+    assert registered == [
+        ("upgrade-test-skill", "---\nname: upgrade-test-skill\ndescription: Static upgrade-test Skill\n---\nVersion 1.\n"),
+        ("upgrade-test-skill", "---\nname: upgrade-test-skill\ndescription: Static upgrade-test Skill\n---\nVersion 2.\n"),
+    ]
+    assert test_context.upgrade_observed_state["registered_skill_versions"] == [
+        {"version": 1, "digest": "sha256:v1"},
+        {"version": 2, "digest": "sha256:v2"},
+    ]
+    # The seeded Skill must survive into the post-upgrade phase.
+    assert test_context.skills_to_delete == {}
+
+
+def test_action_register_upgrade_skill_versions_fails_if_already_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        upgrade_actions.mlflow.genai,
+        "register_skill",
+        lambda **kwargs: pytest.fail("register_skill should not be called"),
     )
-    assert registered_markdown[0].startswith(f"---\nname: {name}\n")
-    assert registered_markdown[0].endswith("Version 1.\n")
-    assert test_context.skills_to_delete == {("", name): "mlflow-upgrade-test-workspace"}
+    test_context = TestContext(
+        active_workspace="mlflow-upgrade-test-workspace",
+        user_client=_FakeSkillClient(),
+        upgrade_state={"skill_registry": _SKILL_REGISTRY_STATE},
+    )
+
+    with pytest.raises(AssertionError, match="already exists in workspace 'mlflow-upgrade-test-workspace'"):
+        upgrade_actions.action_register_upgrade_skill_versions(test_context)
+
+
+def test_action_register_upgrade_skill_versions_propagates_unexpected_lookup_errors() -> None:
+    test_context = TestContext(
+        user_client=_FakeSkillClient(get_skill_error=MlflowException(message="INTERNAL_ERROR: boom")),
+        upgrade_state={"skill_registry": _SKILL_REGISTRY_STATE},
+    )
+
+    with pytest.raises(MlflowException, match="boom"):
+        upgrade_actions.action_register_upgrade_skill_versions(test_context)
 
 
 def test_action_tag_and_alias_upgrade_skill_requires_registered_versions() -> None:
-    test_context = TestContext(
-        active_skill=ActiveSkill(name="upgrade-skill-abc"),
-        upgrade_state={"skill_registry": _SKILL_REGISTRY_STATE},
-    )
+    test_context = TestContext(upgrade_state={"skill_registry": _SKILL_REGISTRY_STATE})
 
     with pytest.raises(ValueError, match="must be registered before tagging"):
         upgrade_actions.action_tag_and_alias_upgrade_skill(test_context)
@@ -379,7 +415,6 @@ def test_action_tag_and_alias_upgrade_skill_requires_registered_versions() -> No
 def test_action_tag_and_alias_upgrade_skill_targets_first_version() -> None:
     client = _FakeSkillClient()
     test_context = TestContext(
-        active_skill=ActiveSkill(name="upgrade-skill-abc"),
         user_client=client,
         upgrade_state={"skill_registry": _SKILL_REGISTRY_STATE},
         upgrade_observed_state={"registered_skill_versions": [{"version": 1}, {"version": 2}]},
@@ -388,18 +423,18 @@ def test_action_tag_and_alias_upgrade_skill_targets_first_version() -> None:
     upgrade_actions.action_tag_and_alias_upgrade_skill(test_context)
 
     assert client.calls == [
-        ("update_skill", {"name": "upgrade-skill-abc", "description": _SKILL_REGISTRY_STATE["description"]}),
-        ("set_skill_tag", {"name": "upgrade-skill-abc", "key": "upgrade-tag-key", "value": "upgrade-tag-value"}),
+        ("update_skill", {"name": "upgrade-test-skill", "description": _SKILL_REGISTRY_STATE["description"]}),
+        ("set_skill_tag", {"name": "upgrade-test-skill", "key": "upgrade-tag-key", "value": "upgrade-tag-value"}),
         (
             "set_skill_version_tag",
             {
-                "name": "upgrade-skill-abc",
+                "name": "upgrade-test-skill",
                 "version": 1,
                 "key": "upgrade-version-tag-key",
                 "value": "upgrade-version-tag-value",
             },
         ),
-        ("set_skill_alias", {"name": "upgrade-skill-abc", "alias": "production", "version": 1}),
+        ("set_skill_alias", {"name": "upgrade-test-skill", "alias": "production", "version": 1}),
     ]
 
 
@@ -418,7 +453,6 @@ def test_action_collect_upgrade_skill_observations_records_reads_and_pull(
     monkeypatch.setattr(upgrade_actions, "compute_tree_digest", lambda root: "sha256:pulled")
     client = _FakeSkillClient()
     test_context = TestContext(
-        active_skill=ActiveSkill(name="upgrade-skill-abc"),
         user_client=client,
         upgrade_state={"skill_registry": _SKILL_REGISTRY_STATE},
     )
@@ -426,100 +460,13 @@ def test_action_collect_upgrade_skill_observations_records_reads_and_pull(
     upgrade_actions.action_collect_upgrade_skill_observations(test_context)
 
     observed = test_context.upgrade_observed_state
-    assert pulled_uris == ["skills:/upgrade-skill-abc@production"]
+    assert pulled_uris == ["skills:/upgrade-test-skill@production"]
     assert observed["skill"]["aliases"] == {"production": 1}
     assert observed["skill"]["latest_version"] == 2
+    assert observed["skill_version_digests"] == {1: "sha256:v1", 2: "sha256:v2"}
     assert observed["skill_version_by_alias"] == {"version": 1, "digest": "sha256:v1", "tags": {"k": "v"}}
     assert observed["latest_skill_version"] == 2
     assert observed["skill_found_in_search"] is True
-    assert ("search_skills", {"include_skill_identities": ["upgrade-skill-abc"]}) in client.calls
+    assert ("search_skills", {"include_skill_identities": ["upgrade-test-skill"]}) in client.calls
     assert observed["pulled_skill_markdown"] == "pulled content"
     assert observed["pulled_skill_digest"] == "sha256:pulled"
-
-
-def test_action_delete_upgrade_skill_records_missing_skill() -> None:
-    client = _FakeSkillClient(
-        get_skill_error=MlflowException(message="RESOURCE_DOES_NOT_EXIST: Skill does not exist")
-    )
-    test_context = TestContext(active_skill=ActiveSkill(name="upgrade-skill-abc"), user_client=client)
-
-    upgrade_actions.action_delete_upgrade_skill(test_context)
-
-    assert ("delete_skill", {"name": "upgrade-skill-abc"}) in client.calls
-    assert test_context.upgrade_observed_state["skill_exists_after_delete"] is False
-
-
-def test_action_delete_upgrade_skill_records_skill_still_present() -> None:
-    test_context = TestContext(active_skill=ActiveSkill(name="upgrade-skill-abc"), user_client=_FakeSkillClient())
-
-    upgrade_actions.action_delete_upgrade_skill(test_context)
-
-    assert test_context.upgrade_observed_state["skill_exists_after_delete"] is True
-
-
-def test_action_delete_upgrade_skill_propagates_unexpected_errors() -> None:
-    client = _FakeSkillClient(get_skill_error=MlflowException(message="INTERNAL_ERROR: boom"))
-    test_context = TestContext(active_skill=ActiveSkill(name="upgrade-skill-abc"), user_client=client)
-
-    with pytest.raises(MlflowException, match="boom"):
-        upgrade_actions.action_delete_upgrade_skill(test_context)
-
-
-class _FakeCleanupAdminClient:
-    def __init__(self, errors: dict[str, Exception] | None = None) -> None:
-        self.deleted = []
-        self.errors = errors or {}
-
-    def delete_skill(self, *, name, organization):
-        self.deleted.append((organization, name))
-        if name in self.errors:
-            raise self.errors[name]
-
-
-def test_cleanup_upgrade_skills_deletes_tracked_skills_in_their_workspace(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    workspaces = []
-    monkeypatch.setattr(upgrade_actions.mlflow, "set_workspace", workspaces.append)
-    test_context = TestContext()
-    test_context.add_skill_for_cleanup(name="upgrade-skill-abc", workspace="mlflow-upgrade-test-workspace")
-    admin_client = _FakeCleanupAdminClient()
-
-    upgrade_actions.cleanup_upgrade_skills(test_context, admin_client)
-
-    assert admin_client.deleted == [("", "upgrade-skill-abc")]
-    assert workspaces == ["mlflow-upgrade-test-workspace"]
-
-
-def test_cleanup_upgrade_skills_does_nothing_without_tracked_skills(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(upgrade_actions.mlflow, "set_workspace", lambda workspace: None)
-    admin_client = _FakeCleanupAdminClient()
-
-    upgrade_actions.cleanup_upgrade_skills(TestContext(), admin_client)
-
-    assert admin_client.deleted == []
-
-
-def test_cleanup_upgrade_skills_tolerates_missing_and_failed_deletes(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(upgrade_actions.mlflow, "set_workspace", lambda workspace: None)
-    test_context = TestContext()
-    for name in ("already-deleted", "delete-fails", "still-present"):
-        test_context.add_skill_for_cleanup(name=name, workspace="mlflow-upgrade-test-workspace")
-    admin_client = _FakeCleanupAdminClient(
-        errors={
-            "already-deleted": MlflowException(message="RESOURCE_DOES_NOT_EXIST: Skill does not exist"),
-            "delete-fails": MlflowException(message="INTERNAL_ERROR: boom"),
-        }
-    )
-
-    upgrade_actions.cleanup_upgrade_skills(test_context, admin_client)
-
-    assert admin_client.deleted == [
-        ("", "already-deleted"),
-        ("", "delete-fails"),
-        ("", "still-present"),
-    ]

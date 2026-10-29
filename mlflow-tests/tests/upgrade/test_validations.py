@@ -4,6 +4,7 @@ import pytest
 
 from ..shared import TestContext
 from . import validations as upgrade_validations
+from .utils import build_upgrade_skill_markdown, compute_upgrade_skill_digest
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -139,20 +140,27 @@ def test_validate_pre_upgrade_version_checks_supported_version_pre_upgrade(
 
 
 _SKILL_REGISTRY_CASE = {
-    "description": "Skill registered after upgrading a pre-registry deployment",
+    "name": "upgrade-test-skill",
+    "description": "Static upgrade-test Skill",
     "skill_tags": {"upgrade-tag-key": "upgrade-tag-value"},
     "version_tags": {"upgrade-version-tag-key": "upgrade-version-tag-value"},
     "alias": "production",
     "versions": [{"body": "Version 1.\n"}, {"body": "Version 2.\n"}],
 }
+_SKILL_MARKDOWN = [
+    build_upgrade_skill_markdown(_SKILL_REGISTRY_CASE, version)
+    for version in _SKILL_REGISTRY_CASE["versions"]
+]
+_SKILL_DIGESTS = [compute_upgrade_skill_digest(markdown) for markdown in _SKILL_MARKDOWN]
 
 
 def _skill_registry_observations() -> dict:
     return {
         "registered_skill_versions": [
-            {"version": 1, "digest": "sha256:v1", "skill_markdown": "version 1 content"},
-            {"version": 2, "digest": "sha256:v2", "skill_markdown": "version 2 content"},
+            {"version": 1, "digest": _SKILL_DIGESTS[0]},
+            {"version": 2, "digest": _SKILL_DIGESTS[1]},
         ],
+        "skill_version_digests": {1: _SKILL_DIGESTS[0], 2: _SKILL_DIGESTS[1]},
         "skill": {
             "description": _SKILL_REGISTRY_CASE["description"],
             "tags": {"upgrade-tag-key": "upgrade-tag-value"},
@@ -161,13 +169,13 @@ def _skill_registry_observations() -> dict:
         },
         "skill_version_by_alias": {
             "version": 1,
-            "digest": "sha256:v1",
+            "digest": _SKILL_DIGESTS[0],
             "tags": {"upgrade-version-tag-key": "upgrade-version-tag-value"},
         },
         "latest_skill_version": 2,
         "skill_found_in_search": True,
-        "pulled_skill_markdown": "version 1 content",
-        "pulled_skill_digest": "sha256:v1",
+        "pulled_skill_markdown": _SKILL_MARKDOWN[0],
+        "pulled_skill_digest": _SKILL_DIGESTS[0],
     }
 
 
@@ -176,6 +184,35 @@ def _skill_registry_context(observed: dict) -> TestContext:
         upgrade_state={"skill_registry": _SKILL_REGISTRY_CASE},
         upgrade_observed_state=observed,
     )
+
+
+def test_skill_digests_differ_between_versions() -> None:
+    assert _SKILL_MARKDOWN[0].startswith("---\nname: upgrade-test-skill\n")
+    assert _SKILL_DIGESTS[0] != _SKILL_DIGESTS[1]
+
+
+def test_validate_registered_upgrade_skill_versions_passes_when_versions_match() -> None:
+    upgrade_validations.validate_registered_upgrade_skill_versions(
+        _skill_registry_context(_skill_registry_observations())
+    )
+
+
+@pytest.mark.parametrize(
+    "registered",
+    [
+        [{"version": 1, "digest": _SKILL_DIGESTS[0]}, {"version": 1, "digest": _SKILL_DIGESTS[1]}],
+        [{"version": 1, "digest": _SKILL_DIGESTS[0]}, {"version": 2, "digest": "sha256:other"}],
+        [{"version": 1, "digest": _SKILL_DIGESTS[0]}],
+        None,
+    ],
+    ids=["reused-version", "wrong-digest", "missing-version", "not-registered"],
+)
+def test_validate_registered_upgrade_skill_versions_fails_on_mismatch(registered) -> None:
+    observed = _skill_registry_observations()
+    observed["registered_skill_versions"] = registered
+
+    with pytest.raises(AssertionError, match="Expected registered Skill versions"):
+        upgrade_validations.validate_registered_upgrade_skill_versions(_skill_registry_context(observed))
 
 
 def test_validate_upgrade_skill_registry_passes_when_state_matches() -> None:
@@ -187,9 +224,11 @@ def test_validate_upgrade_skill_registry_passes_when_state_matches() -> None:
 @pytest.mark.parametrize(
     ("section", "key", "value", "message"),
     [
+        ("skill", "description", "changed", "Skill description mismatch"),
         ("skill", "aliases", {"production": 2}, "Skill aliases mismatch"),
         ("skill", "latest_version", 1, "Skill latest_version mismatch"),
         ("skill", "tags", {}, "Skill tag 'upgrade-tag-key' mismatch"),
+        ("skill_version_by_alias", "version", 2, "resolved to version 2"),
         ("skill_version_by_alias", "digest", "sha256:other", "digest mismatch"),
         ("skill_version_by_alias", "tags", {}, "version tag 'upgrade-version-tag-key' mismatch"),
     ],
@@ -207,48 +246,19 @@ def test_validate_upgrade_skill_registry_fails_on_read_mismatch(
 @pytest.mark.parametrize(
     ("key", "value", "message"),
     [
+        ("skill_version_digests", {1: _SKILL_DIGESTS[0]}, "Skill versions mismatch"),
+        ("skill_version_digests", {1: _SKILL_DIGESTS[0], 2: "sha256:other"}, "Skill versions mismatch"),
         ("skill_found_in_search", False, "not returned by search_skills"),
-        ("pulled_skill_markdown", "version 2 content", "Pulled SKILL.md"),
-        ("pulled_skill_digest", "sha256:v2", "Pulled content digest mismatch"),
+        ("pulled_skill_markdown", _SKILL_MARKDOWN[1], "Pulled SKILL.md"),
+        ("pulled_skill_digest", _SKILL_DIGESTS[1], "Pulled content digest mismatch"),
         ("latest_skill_version", 1, "Latest Skill version mismatch"),
     ],
 )
-def test_validate_upgrade_skill_registry_fails_on_search_or_pull_mismatch(
+def test_validate_upgrade_skill_registry_fails_on_version_search_or_pull_mismatch(
     key: str, value: object, message: str
 ) -> None:
     observed = _skill_registry_observations()
     observed[key] = value
 
     with pytest.raises(AssertionError, match=message):
-        upgrade_validations.validate_upgrade_skill_registry(_skill_registry_context(observed))
-
-
-def test_validate_upgrade_skill_registry_fails_on_missing_digest() -> None:
-    observed = _skill_registry_observations()
-    observed["registered_skill_versions"][1]["digest"] = None
-
-    with pytest.raises(AssertionError, match="registered without a digest"):
-        upgrade_validations.validate_upgrade_skill_registry(_skill_registry_context(observed))
-
-
-@pytest.mark.parametrize("exists", [True, None])
-def test_validate_upgrade_skill_deleted_fails_unless_skill_is_gone(exists: bool | None) -> None:
-    test_context = TestContext(upgrade_observed_state={"skill_exists_after_delete": exists})
-
-    with pytest.raises(AssertionError, match="gone after delete_skill"):
-        upgrade_validations.validate_upgrade_skill_deleted(test_context)
-
-
-def test_validate_upgrade_skill_deleted_passes_when_skill_is_gone() -> None:
-    test_context = TestContext(upgrade_observed_state={"skill_exists_after_delete": False})
-    upgrade_validations.validate_upgrade_skill_deleted(test_context)
-
-
-def test_validate_upgrade_skill_registry_fails_when_registration_reuses_a_version() -> None:
-    observed = _skill_registry_observations()
-    observed["registered_skill_versions"][1]["version"] = 1
-    observed["skill"]["latest_version"] = 1
-    observed["latest_skill_version"] = 1
-
-    with pytest.raises(AssertionError, match=r"Expected registered Skill versions \[1, 2\], got \[1, 1\]"):
         upgrade_validations.validate_upgrade_skill_registry(_skill_registry_context(observed))

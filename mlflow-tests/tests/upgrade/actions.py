@@ -6,7 +6,6 @@ import logging
 import os
 import tempfile
 import time
-import uuid
 from pathlib import Path
 
 import mlflow
@@ -19,8 +18,9 @@ import requests
 
 from ..constants.config import Config
 from ..http_utils import get_mlflow_base_uri, get_requests_verify_value
-from ..shared import ActiveSkill, TestContext
+from ..shared import TestContext
 from .utils import (
+    build_upgrade_skill_markdown,
     get_pre_upgrade_version_from_configmap,
     get_supported_upgrade_version_from_env,
     upsert_pre_upgrade_version_configmap,
@@ -430,40 +430,27 @@ def action_create_upgrade_mcp_access_endpoint(test_context: TestContext) -> None
     test_context.upgrade_observed_state["mcp_access_endpoint_id"] = endpoint.id
 
 
-def _require_active_skill_name(test_context: TestContext) -> str:
-    if test_context.active_skill is None or not test_context.active_skill.name:
-        raise ValueError("active_skill.name must be set before this action")
-    return test_context.active_skill.name
-
-
 def action_register_upgrade_skill_versions(test_context: TestContext) -> None:
-    """Register each configured Skill version from a local directory."""
+    """Register each configured version of the static upgrade Skill from a local directory."""
     payload = _require_upgrade_payload(test_context, "skill_registry")
-    # A unique name keeps reruns in the static upgrade workspace independent.
-    name = f"{payload['name_prefix']}-{uuid.uuid4().hex[:12]}"
-    test_context.active_skill = ActiveSkill(name=name)
+    name = payload["name"]
+    try:
+        test_context.user_client.get_skill(name=name)
+        raise AssertionError(
+            f"Upgrade Skill '{name}' already exists in workspace "
+            f"'{test_context.active_workspace}'. Clean the static upgrade workspace before reseeding."
+        )
+    except MlflowException as exc:
+        if not _is_missing_resource_error(exc):
+            raise
     registered = []
     for version_payload in payload["versions"]:
-        skill_markdown = (
-            f"---\nname: {name}\ndescription: {payload['description']}\n---\n"
-            f"{version_payload['body']}"
-        )
         with tempfile.TemporaryDirectory() as tmpdir:
-            (Path(tmpdir) / "SKILL.md").write_text(skill_markdown, encoding="utf-8")
-            version = mlflow.genai.register_skill(source=tmpdir, name=name)
-        if not registered:
-            test_context.add_skill_for_cleanup(
-                name=version.name,
-                organization=version.organization,
-                workspace=test_context.active_workspace,
+            (Path(tmpdir) / "SKILL.md").write_text(
+                build_upgrade_skill_markdown(payload, version_payload), encoding="utf-8"
             )
-        registered.append(
-            {
-                "version": version.version,
-                "digest": version.digest,
-                "skill_markdown": skill_markdown,
-            }
-        )
+            version = mlflow.genai.register_skill(source=tmpdir, name=name)
+        registered.append({"version": version.version, "digest": version.digest})
         logger.info("Registered upgrade Skill '%s' version %s", name, version.version)
     test_context.upgrade_observed_state["registered_skill_versions"] = registered
 
@@ -471,10 +458,10 @@ def action_register_upgrade_skill_versions(test_context: TestContext) -> None:
 def action_tag_and_alias_upgrade_skill(test_context: TestContext) -> None:
     """Set the description, tags, and alias, pointing the alias at the first version."""
     payload = _require_upgrade_payload(test_context, "skill_registry")
-    name = _require_active_skill_name(test_context)
     registered = test_context.upgrade_observed_state.get("registered_skill_versions")
     if not registered:
         raise ValueError("Upgrade Skill versions must be registered before tagging")
+    name = payload["name"]
     first_version = registered[0]["version"]
     client = test_context.user_client
     client.update_skill(name=name, description=payload["description"])
@@ -486,9 +473,9 @@ def action_tag_and_alias_upgrade_skill(test_context: TestContext) -> None:
 
 
 def action_collect_upgrade_skill_observations(test_context: TestContext) -> None:
-    """Read the Skill back through get, alias, latest, search, and pull."""
+    """Read the upgrade Skill back through get, versions, alias, latest, search, and pull."""
     payload = _require_upgrade_payload(test_context, "skill_registry")
-    name = _require_active_skill_name(test_context)
+    name = payload["name"]
     alias = payload["alias"]
     client = test_context.user_client
     observed = test_context.upgrade_observed_state
@@ -499,6 +486,9 @@ def action_collect_upgrade_skill_observations(test_context: TestContext) -> None
         "tags": dict(skill.tags),
         "aliases": dict(skill.aliases),
         "latest_version": skill.latest_version,
+    }
+    observed["skill_version_digests"] = {
+        version.version: version.digest for version in client.search_skill_versions(name=name)
     }
     by_alias = client.get_skill_version_by_alias(name=name, alias=alias)
     observed["skill_version_by_alias"] = {
@@ -514,36 +504,3 @@ def action_collect_upgrade_skill_observations(test_context: TestContext) -> None
         pulled = Path(mlflow.genai.pull(f"skills:/{name}@{alias}", destination=Path(tmpdir) / "pulled"))
         observed["pulled_skill_markdown"] = (pulled / "SKILL.md").read_text(encoding="utf-8")
         observed["pulled_skill_digest"] = compute_tree_digest(pulled)
-
-
-def action_delete_upgrade_skill(test_context: TestContext) -> None:
-    """Hard-delete the upgrade Skill and record whether it can still be read."""
-    name = _require_active_skill_name(test_context)
-    client = test_context.user_client
-    client.delete_skill(name=name)
-    try:
-        client.get_skill(name=name)
-    except MlflowException as exc:
-        if not _is_missing_resource_error(exc):
-            raise
-        test_context.upgrade_observed_state["skill_exists_after_delete"] = False
-    else:
-        test_context.upgrade_observed_state["skill_exists_after_delete"] = True
-
-
-def cleanup_upgrade_skills(test_context: TestContext, admin_client) -> None:
-    """Delete Skills created by an upgrade scenario, leaving seeded upgrade data in place.
-
-    The shared resource cleanup is skipped during upgrade phases so the seeded state survives,
-    which would otherwise leave a Skill behind in the static workspace when a scenario fails
-    before its own delete step. Only Skills tracked in skills_to_delete are removed.
-    """
-    for (organization, name), workspace in test_context.skills_to_delete.items():
-        try:
-            mlflow.set_workspace(workspace)
-            admin_client.delete_skill(name=name, organization=organization)
-            logger.info("Deleted upgrade Skill '%s' in workspace '%s'", name, workspace)
-        except MlflowException as exc:
-            if _is_missing_resource_error(exc):
-                continue
-            logger.warning("Failed to delete upgrade Skill '%s' in workspace '%s': %s", name, workspace, exc)
