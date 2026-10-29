@@ -13,6 +13,7 @@ from ..actions import (
     action_register_upgrade_skill_versions,
     action_tag_and_alias_upgrade_skill,
 )
+from ...constants.config import Config
 from ...shared import TestData, TestStep
 from ...validations import validate_no_error
 from ..shared.upgrade_state_3_10 import (
@@ -93,38 +94,44 @@ class TestMLflow310PostUpgrade(UpgradePhaseBase):
                 TestStep(validate_func=validate_upgrade_registered_models),
             ],
         ),
-        # This lives in the 3.10 module because post-upgrade files are selected by the
-        # pre-upgrade version: the seeded job upgrades from 3.10, which has no Skill Registry,
-        # so this proves the registry works on a database migrated from a pre-registry version.
-        TestData(
-            test_name="Validate Skill Registry on a migrated database",
-            workspace_to_use=UPGRADE_TEST_WORKSPACE,
-            test_steps=[
-                TestStep(
-                    action_func=make_upgrade_state_action(
-                        "action_select_skill_registry_state",
-                        skill_registry=SKILL_REGISTRY_STATE,
-                    )
-                ),
-                TestStep(
-                    action_func=action_register_upgrade_skill_versions,
-                    validate_func=validate_no_error,
-                ),
-                TestStep(
-                    action_func=action_tag_and_alias_upgrade_skill,
-                    validate_func=validate_no_error,
-                ),
-                TestStep(
-                    action_func=action_collect_upgrade_skill_observations,
-                    validate_func=validate_upgrade_skill_registry,
-                ),
-                TestStep(
-                    action_func=action_delete_upgrade_skill,
-                    validate_func=validate_upgrade_skill_deleted,
-                ),
-            ],
-        ),
     ]
+
+    # This lives in the 3.10 module because post-upgrade files are selected by the
+    # pre-upgrade version: the seeded job upgrades from 3.10, which has no Skill Registry,
+    # so this proves the registry works on a database migrated from a pre-registry version.
+    # Registering Skill versions from a local directory needs MLflow artifact serving, so the
+    # scenario only runs where the Skill Registry tests also register local Skills.
+    if Config.effective_serve_artifacts():
+        test_scenarios.append(
+            TestData(
+                test_name="Validate Skill Registry on a migrated database",
+                workspace_to_use=UPGRADE_TEST_WORKSPACE,
+                test_steps=[
+                    TestStep(
+                        action_func=make_upgrade_state_action(
+                            "action_select_skill_registry_state",
+                            skill_registry=SKILL_REGISTRY_STATE,
+                        )
+                    ),
+                    TestStep(
+                        action_func=action_register_upgrade_skill_versions,
+                        validate_func=validate_no_error,
+                    ),
+                    TestStep(
+                        action_func=action_tag_and_alias_upgrade_skill,
+                        validate_func=validate_no_error,
+                    ),
+                    TestStep(
+                        action_func=action_collect_upgrade_skill_observations,
+                        validate_func=validate_upgrade_skill_registry,
+                    ),
+                    TestStep(
+                        action_func=action_delete_upgrade_skill,
+                        validate_func=validate_upgrade_skill_deleted,
+                    ),
+                ],
+            )
+        )
 
     @pytest.mark.parametrize("test_data", test_scenarios, ids=lambda x: x.test_name)
     def test_post_upgrade_scenario(self, test_data: TestData) -> None:
